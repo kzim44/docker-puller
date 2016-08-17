@@ -1,0 +1,113 @@
+#!/usr/bin/env python3
+
+from flask import Flask
+from flask import request
+from flask import jsonify
+import json
+import os.path
+import os
+import subprocess
+import logging
+import logging.handlers
+import click
+import coloredlogs
+
+app = Flask(__name__)
+config = None
+
+
+@app.route('/', methods=['POST'])
+def hook_listen():
+    if request.method == 'POST':
+
+        token = request.args.get('token')
+        if token == config['token']:
+
+            hook = request.args.get('hook')
+
+            if hook:
+                hook_value = config['hooks'].get(hook)
+
+                if hook_value:
+                    try:
+                        logging.info("Running hook %s", hook)
+                        hook_out = subprocess.check_output(hook_value, stderr=subprocess.STDOUT)
+                        logging.info("Output: %s", hook_out)
+                        return jsonify(success=True), 200
+                    except OSError as e:
+                        logging.exception("Error runnig hook %s", hook)
+                        return jsonify(success=False, error=str(e)), 400
+                else:
+                    logging.error("Hook script %s not found", hook_value)
+                    return jsonify(success=False, error="Hook not found"), 404
+            else:
+                logging.error("Hook  %s not found", hook)
+                return jsonify(success=False, error="Invalid request: missing hook"), 400
+        else:
+            logging.error("Invalid token %s", token)
+            return jsonify(success=False, error="Invalid token"), 400
+
+
+def load_config(config_path):
+    logging.debug('Loading config file %s', config_path)
+    with open(config_path) as config_file:
+        return json.load(config_file)
+
+
+@click.command()
+@click.option('--config', 'config_path', default='/etc/dockerpuller/config.json',
+              type=click.Path(exists=True, dir_okay=False, readable=True, resolve_path=True),
+              help='Config file location')
+@click.option('--log', default="warning", envvar="BBDB_CLI_LOG",
+              type=click.Choice(['debug', 'info', 'warning', 'error', 'critical']),
+              help='log level. Defaults to warning.')
+def main(config_path, log):
+
+    log_level = getattr(logging, log.upper(), None)
+
+    log = logging.getLogger()
+    log.setLevel(logging.DEBUG)
+
+    #
+    # Configure logging to both console and file
+    #
+    log_dir = os.path.join('/var/log/dockerpuller')
+    if not os.path.exists(log_dir):
+        os.mkdir(log_dir)
+
+    log = logging.getLogger()
+    log.setLevel(log_level)
+
+    log_format = '%(asctime)s %(levelname)s %(message)s'
+
+    # Colorize log output. Use a  standard format. FYI - the  default format is:
+    #   '%(asctime)s %(hostname)s %(name)s[%(process)d] %(levelname)s %(message)s'
+    #
+    coloredlogs.install(level=log_level,
+                        fmt=log_format,
+                        field_styles={'hostname': {'color': 'magenta'},
+                                      'programname': {'color': 'cyan'},
+                                      'name': {'color': 'blue'},
+                                      'levelname': {'color': 'cyan', 'bold': True},
+                                      'asctime': {'color': 'yellow'},
+                                      'message': {'color': 'green'}})
+
+    log_path = os.path.join(log_dir, 'dockerpuller.log')
+    logging.debug('Logging to %s', log_path)
+
+    fh = logging.handlers.RotatingFileHandler(log_path, maxBytes=(1048576 * 5),
+                                              backupCount=7)
+    fh.setLevel(log_level)
+    fh.setFormatter(logging.Formatter(log_format))
+    log.addHandler(fh)
+
+    global config
+    config = load_config(config_path)
+
+    logging.debug('Config = %s', config)
+
+    app.run(host=config.get('host', 'localhost'), port=config.get('port', 8000))
+
+
+if __name__ == '__main__':
+    main(auto_envvar_prefix="DOCKERPULLER")
